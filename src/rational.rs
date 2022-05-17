@@ -11,19 +11,21 @@
 //! 
 use std::fmt;
 use std::convert::From;
-use std::ops::{Add, Sub, Mul, Div, Neg};
-use std::ops::{AddAssign, SubAssign, MulAssign, DivAssign};
+use std::cmp::Ordering;
+use std::ops::{
+    Add, Sub, Mul, Div, Neg,
+    AddAssign, SubAssign, MulAssign, DivAssign
+};
 
 /// The maximum numerical error allowed in conversion
 /// from a real number to a rational number.
-const MAXIMUM_DENOMINATOR: u64 = 1_000_000_000_000;
+const MAXIMUM_DENOMINATOR: i64 = 1_000_000_000_000;
 
 /// Defines the rational numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rational {
-    sign:  i8,
-    numer: u64,
-    denom: u64,
+    numer: i64,
+    denom: i64,
 }
 
 
@@ -31,44 +33,40 @@ impl Rational {
     /// Maximum value that the `Rational` can deal with.
     #[inline(always)]
     pub const fn infinity() -> Rational {
-        Rational { sign: 1, numer: u64::MAX, denom: 1 }
+        Rational { numer: i64::MAX, denom: 1 }
     }
 
 
     /// Minimum value that the `Rational` can deal with.
     #[inline(always)]
     pub const fn neg_infinity() -> Rational {
-        Rational { sign: -1, numer: u64::MAX, denom: 1 }
+        Rational { numer: i64::MIN, denom: 1 }
     }
 
 
     /// Zero value for the `Rational`.
     #[inline(always)]
     pub const fn zero() -> Rational {
-        Rational { sign: 1, numer: 0, denom: 1 }
+        Rational { numer: 0, denom: 1 }
     }
 
 
     /// Construct the `Rational` from raw representation
     #[inline(always)]
-    pub fn raw(sign: i8, numer: u64, denom: u64) -> Self {
-        if sign == 0 {
-            panic!("sign must be a non-zero integer");
-        }
-
-        let sign = sign.signum();
+    pub fn raw(numer: i64, denom: i64) -> Self {
 
         if denom == 0 {
-            panic!("Zero division occurred!");
+            panic!("Zero division occurred.");
         }
 
-        let rational = Rational { sign, numer, denom };
+        let rational = Rational { numer, denom };
         rational.reduction()
     }
 
     /// Convert the rational number into an `f64`.
+    #[inline(always)]
     pub fn as_f64(&self) -> f64 {
-        self.sign as f64 * (self.numer as f64 / self.denom as f64)
+        self.numer as f64 / self.denom as f64
     }
 
 
@@ -76,9 +74,9 @@ impl Rational {
     #[inline(always)]
     fn reduction(mut self) -> Self {
         if self.numer == 0 {
-            Rational { sign: 1, numer: 0, denom: 1 }
+            Rational { numer: 0, denom: 1 }
         } else {
-            let divisor = gcd(self.denom, self.numer);
+            let divisor = gcd(self.denom.abs(), self.numer.abs());
             self.numer /= divisor;
             self.denom /= divisor;
 
@@ -89,14 +87,39 @@ impl Rational {
 
     #[inline(always)]
     pub(crate) fn inv(mut self) -> Self {
+        if self.numer == 0 {
+            panic!("Zero division occurred.");
+        }
         std::mem::swap(&mut self.numer, &mut self.denom);
+        if self.denom < 0 {
+            self.denom *= -1;
+            self.numer *= -1;
+        }
         self
+    }
+
+
+    #[inline(always)]
+    pub(crate) fn is_zero(&self) -> bool {
+        self.numer == 0
+    }
+
+
+    #[inline(always)]
+    pub(crate) fn is_negative(&self) -> bool {
+        self.numer < 0
+    }
+
+
+    #[inline(always)]
+    pub(crate) fn is_positive(&self) -> bool {
+        self.numer > 0
     }
 }
 
 
 /// Finds the greatest commondivisor by the Euclidean algorithm
-fn gcd(m: u64, n: u64) -> u64 {
+fn gcd(m: i64, n: i64) -> i64 {
     if n == 0 {
         return m;
     }
@@ -111,7 +134,7 @@ impl<T> From<T> for Rational
     /// Convert the real number to `Rational`.
     fn from(num: T) -> Self {
         let mut num = num.into();
-        let mut sign: i8 = 1;
+        let mut sign: i64 = 1;
 
         // For simplicity, we set the `num` to be non-negative.
         if num < 0.0 {
@@ -133,12 +156,12 @@ impl<T> From<T> for Rational
         //  * q_n = a_n * q_{n-1} + q_{n-2}    if n >= 1
         //        = 1                          if n == 0
         //        = 0                          otherwise
-        let mut p: u64 = 1;
-        let mut q: u64 = 0;
-        let mut r: u64 = 0;
-        let mut s: u64 = 1;
+        let mut p: i64 = 1;
+        let mut q: i64 = 0;
+        let mut r: i64 = 0;
+        let mut s: i64 = 1;
 
-        let mut ai = num as u64;
+        let mut ai = num as i64;
 
         // LOOP until the denominator reaches some limit.
         // Note that this stopping criterion guarantees that
@@ -146,7 +169,7 @@ impl<T> From<T> for Rational
         // `1.0 / MAXIMUM_DENOMINATOR.pow(2)`-close to the original num.
         // Check the number theory.
         while MAXIMUM_DENOMINATOR > r * ai + s {
-            ai = num as u64;
+            ai = num as i64;
 
             // Update the matrix
             let temp = p;
@@ -164,7 +187,10 @@ impl<T> From<T> for Rational
 
 
         // Since `p` and `r` are coprime so that we do not need reduction
-        Rational::raw(sign, p, r)
+        Self {
+            numer: sign * p,
+            denom: r
+        }
     }
 }
 
@@ -173,8 +199,7 @@ impl Neg for Rational {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self::Output {
-        let sign = self.sign * -1;
-        Rational::raw(sign, self.numer, self.denom)
+        Rational::raw(-1 * self.numer, self.denom)
     }
 }
 
@@ -187,21 +212,13 @@ macro_rules! impl_rational_inner {
             fn add(self, rhs: $t1) -> Self::Output {
                 let lhs: Rational = self.into();
                 let rhs: Rational = rhs.into();
-                let left  = lhs.sign as i64
-                    * lhs.numer as i64 *  rhs.denom as i64;
-                let right =  rhs.sign as i64
-                    *  rhs.numer as i64 * lhs.denom as i64;
+                let left  = lhs.numer * rhs.denom;
+                let right = rhs.numer * lhs.denom;
 
-                let mut numer = left + right;
-                let mut sign  = 1;
-                if numer < 0 {
-                    sign  = -1;
-                    numer = numer.abs();
-                }
-                let numer = numer as u64;
+                let numer = left + right;
                 let denom = lhs.denom * rhs.denom;
 
-                Rational::raw(sign, numer, denom)
+                Rational::raw(numer, denom)
             }
         }
 
@@ -217,17 +234,18 @@ macro_rules! impl_rational_inner {
                 lhs + rhs
             }
         }
+
+
         impl Mul<$t1> for $t2 {
             type Output = Rational;
             #[inline]
             fn mul(self, rhs: $t1) -> Self::Output {
                 let lhs: Rational = self.into();
                 let rhs: Rational = rhs.into();
-                let sign  = lhs.sign  * rhs.sign;
                 let numer = lhs.numer * rhs.numer;
                 let denom = lhs.denom * rhs.denom;
 
-                Rational::raw(sign, numer, denom)
+                Rational::raw(numer, denom)
             }
         }
 
@@ -237,12 +255,10 @@ macro_rules! impl_rational_inner {
             #[inline]
             fn div(self, rhs: $t1) -> Self::Output {
                 let lhs: Rational = self.into();
-                let rhs: Rational = rhs.into();
-                let sign  = lhs.sign  * rhs.sign;
-                let numer = lhs.numer * rhs.denom;
-                let denom = lhs.denom * rhs.numer;
+                let rhs: Rational = Rational::from(rhs).inv();
 
-                Rational::raw(sign, numer, denom)
+
+                lhs * rhs
             }
         }
     )
@@ -266,21 +282,13 @@ macro_rules! impl_rational_op_assign {
             #[inline]
             fn add_assign(&mut self, rhs: $t) {
                 let rhs: Rational = rhs.into();
-                let left  = self.sign as i64
-                    * self.numer as i64 *  rhs.denom as i64;
-                let right =  rhs.sign as i64
-                    *  rhs.numer as i64 * self.denom as i64;
+                let left  = self.numer * rhs.denom;
+                let right = rhs.numer * self.denom;
 
-                let mut numer = left + right;
-                let mut sign  = 1;
-                if numer < 0 {
-                    sign  = -1;
-                    numer = numer.abs();
-                }
-                let numer = numer as u64;
+
+                let numer = left + right;
                 let denom = self.denom * rhs.denom;
-
-                *self = Self::raw(sign, numer, denom);
+                *self = Rational::raw(numer, denom);
             }
         }
 
@@ -299,11 +307,9 @@ macro_rules! impl_rational_op_assign {
             #[inline]
             fn mul_assign(&mut self, rhs: $t) {
                 let rhs: Rational = rhs.into();
-                let sign  = self.sign  * rhs.sign;
                 let numer = self.numer * rhs.numer;
                 let denom = self.denom * rhs.denom;
-
-                *self = Rational::raw(sign, numer, denom);
+                *self = Rational::raw(numer, denom);
             }
         }
 
@@ -311,12 +317,8 @@ macro_rules! impl_rational_op_assign {
         impl DivAssign<$t> for Rational {
             #[inline]
             fn div_assign(&mut self, rhs: $t) {
-                let rhs: Rational = rhs.into();
-                let sign  = self.sign  * rhs.sign;
-                let numer = self.numer * rhs.denom;
-                let denom = self.denom * rhs.numer;
-
-                *self = Rational::raw(sign, numer, denom);
+                let rhs: Rational = Rational::from(rhs).inv();
+                *self *= rhs;
             }
         }
     )*)
@@ -326,18 +328,30 @@ impl_rational_op_assign! { u8 u16 u32 i8 i16 i32 f32 f64 Rational }
 
 impl Default for Rational {
     fn default() -> Self {
-        Rational { sign: 1, numer: 0, denom: 1 }
+        Rational { numer: 0, denom: 1 }
     }
 }
 
 
 impl fmt::Display for Rational {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let sign = if self.sign > 0 { "" } else { "-" };
         write!(
             f,
-            "{sign}{numer}/{denom}",
+            "({numer:>3}/{denom:>2})",
             numer = self.numer, denom = self.denom
         )
     }
 }
+
+
+impl PartialOrd for Rational {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let lhs = self.numer * other.denom;
+        let rhs = other.numer * self.denom;
+
+        lhs.partial_cmp(&rhs)
+    }
+}
+
+
