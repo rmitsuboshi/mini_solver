@@ -1,12 +1,11 @@
 //! Defines a model of a linear programming.
 //! 
-use crate::rational::Rational;
+use crate::rational::*;
 use crate::error::LpError;
 
 
 use std::fmt;
-use std::collections::{HashMap, HashSet};
-use std::ops::RangeBounds;
+use std::collections::HashMap;
 
 
 /// Simplex tableau.
@@ -38,6 +37,13 @@ impl Tableau {
     #[inline]
     pub(super) fn relative_costs(&self) -> &Vec<Rational> {
         &self.matrix[0]
+    }
+
+
+    /// Returns the number of variables
+    #[inline]
+    fn var_len(&self) -> usize {
+        self.matrix[0].len()
     }
 
 
@@ -79,21 +85,17 @@ impl Tableau {
     #[inline]
     pub(crate) fn solve(&mut self) -> Result<(), LpError> {
         // Initialize the tableau in the canonical form.
-        self.to_canonical()?;
+        self.initialize()?;
 
 
-        Ok(())
+        self.inner_solve()
     }
 
 
-    /// Convert the tableau into the canonical form.
     #[inline]
-    fn to_canonical(&mut self) -> Result<(), LpError> {
+    fn initialize(&mut self) -> Result<(), LpError> {
         let m = self.matrix.len();
-        let n = self.matrix.iter()
-            .map(|row| row.len())
-            .max()
-            .unwrap();
+        let n = self.var_len();
 
 
         // DEBUG
@@ -101,21 +103,57 @@ impl Tableau {
         assert_eq!(self.matrix.len(), self.rhs.len());
 
 
-        // let dummy_vars = (0..m).into_iter()
-        //     .map(|i| {
-        //         let mut v = vec![Rational::from(0.0); m];
-        //         v[i] = Rational::from(1.0);
-        //         v
-        //     })
-        //     .collect::<Vec<_>>();
+        // Relative cost coefficients
+        let mut rcc = vec![Rational::from(0.0); m];
 
-        let mut rcc = vec![Rational::from(0.0); m+n];
 
         for row in self.matrix.iter().skip(1) {
             for (r, &v) in rcc.iter_mut().zip(row.iter()) {
                 *r -= v;
             }
         }
+
+        let mut obj_coef = std::mem::replace(
+            &mut self.matrix[0],
+            rcc,
+        );
+
+
+        self.inner_solve()?;
+
+
+        let mut obj_val = Rational::zero();
+        for (&row, &column) in self.basis.iter() {
+            let multiplier = obj_coef[column];
+
+            let iter = obj_coef.iter_mut()
+                .zip(self.matrix[row].iter());
+            for (c, r) in iter {
+                *c -= multiplier * *r;
+            }
+
+
+            obj_val -= multiplier * self.rhs[row];
+        }
+
+        self.matrix[0] = obj_coef;
+        self.rhs[0] = obj_val;
+
+        Ok(())
+    }
+
+
+    /// Convert the tableau into the canonical form.
+    #[inline]
+    fn inner_solve(&mut self) -> Result<(), LpError> {
+        let m = self.matrix.len();
+
+        let mut rcc = std::mem::replace(
+            &mut self.matrix[0],
+            Vec::with_capacity(0)
+        );
+
+        let mut obj_val = self.rhs[0];
 
 
         // TODO
@@ -124,58 +162,29 @@ impl Tableau {
         // I need to review the code to adapt the degenerate case.
         // loop {
         for _ in 0..m {
-            let basis = rcc.iter()
-                .enumerate()
-                .filter_map(|(i, r)| {
-                    if r.is_negative() {
-                        Some((i, r))
-                    } else {
-                        None
-                    }
-                })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
 
-            let basis = match basis {
-                None => {
-                    break;
-                },
-                Some((i, _)) => i
+            // Find basis (column index)
+            let basis = match find_basis(&rcc[..]) {
+                None => { break; },
+                Some(i) => i
             };
 
 
-            // Find povit
-            let pivot = self.matrix.iter()
-                .zip(&self.rhs)
-                .enumerate()
-                .skip(1)
-                .filter_map(|(i, (m, &r))| {
-                    if m[basis] > Rational::zero() {
-                        Some((i, r / m[basis]))
-                    } else {
-                        None
-                    }
-                })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            // Find pivot (row index)
+            let pivot = find_pivot(&self.matrix[..], &self.rhs[..], basis)?;
 
 
-            let pivot = match pivot {
-                None => {
-                    // TODO
-                    return Err(LpError::Unbounded);
-                },
-                Some((i, _)) => i
-            };
-
-
+            // Normalize the pivot row
             let divisor = self.matrix[pivot][basis];
-            assert!(!divisor.is_zero());
             for m in self.matrix[pivot].iter_mut() {
                 *m /= divisor;
             }
             self.rhs[pivot] /= divisor;
 
 
+
+            // Take the pivot row to update other rows.
             let pivot_row = std::mem::replace(
                 &mut self.matrix[pivot],
                 Vec::with_capacity(0)
@@ -201,41 +210,26 @@ impl Tableau {
             }
 
 
+            // Give back `pivot_row` to `self.matrix[pivot]`
             self.matrix[pivot] = pivot_row;
 
 
             // Update relative cost coefficients
             let multiplier = rcc[basis];
-            for (r, p) in rcc.iter_mut().zip(self.matrix[pivot].iter()) {
+            for (r, p) in rcc.iter_mut().zip(self.matrix[pivot].iter())
+            {
                 *r -= multiplier * *p;
             }
+
+            // Update objective value
+            obj_val -= multiplier * self.rhs[pivot];
 
             let column = self.basis.entry(pivot).or_insert(0);
             *column = basis;
         }
 
 
-        let mut obj_coef = std::mem::replace(
-            &mut self.matrix[0],
-            Vec::with_capacity(0)
-        );
-
-
-        let mut obj_val = Rational::zero();
-        for (&row, &column) in self.basis.iter() {
-            let multiplier = obj_coef[column];
-
-            let iter = obj_coef.iter_mut()
-                .zip(self.matrix[row].iter());
-            for (c, r) in iter {
-                *c -= multiplier * *r;
-            }
-
-
-            obj_val -= multiplier * self.rhs[row];
-        }
-
-        self.matrix[0] = obj_coef;
+        std::mem::swap(&mut rcc, &mut self.matrix[0]);
         self.rhs[0] = obj_val;
 
 
@@ -254,7 +248,7 @@ impl fmt::Display for Tableau {
                     .map(|c| format!("{c}"))
                     .collect::<Vec<_>>()
                     .join("\t");
-                format!("{lhs}\t{rhs}")
+                format!("{lhs}\t|\t{rhs}")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -262,7 +256,7 @@ impl fmt::Display for Tableau {
         write!(f, "{formatted}\n")?;
 
 
-        write!(f, "{lhs}\t{rhs}",
+        write!(f, "{lhs}\t|\t{rhs}",
             lhs = self.matrix[0].iter()
                 .map(|coef| format!("{coef}"))
                 .collect::<Vec<_>>()
@@ -270,4 +264,38 @@ impl fmt::Display for Tableau {
             rhs = self.rhs[0]
         )
     }
+}
+
+
+/// Returns the column index that has minimal value in `rcc`
+#[inline]
+fn find_basis(rcc: &[Rational]) -> Option<usize> {
+    rcc.into_iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            if r.is_negative() { Some((i, r)) } else { None }
+        })
+        .min_by(|(_, a), (_, b)| a.partial_cmp(&b).unwrap())
+        .map(|(i, _)| i)
+}
+
+
+/// Returns a row index to be a pivot.
+#[inline]
+fn find_pivot(tableau: &[Vec<Rational>], rhs: &[Rational], basis: usize)
+    -> Result<usize, LpError>
+{
+    tableau.into_iter()
+        .zip(rhs)
+        .enumerate()
+        .skip(1)
+        .filter_map(|(i, (m, &r))| {
+            if m[basis] > Rational::zero() {
+                Some((i, r / m[basis]))
+            } else {
+                None
+            }
+        })
+        .min_by(|(_, a), (_, b)| a.partial_cmp(&b).unwrap())
+        .map_or(Err(LpError::Unbounded), |(i, _)| Ok(i))
 }
